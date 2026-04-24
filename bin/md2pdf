@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: md2pdf [--output file.pdf] [--html-output file.html] <input.md>
+
+Render Markdown to a browser-style PDF using pandoc + Chrome.
+
+Defaults:
+  - output PDF next to the input Markdown file
+  - temporary HTML is cleaned up automatically
+
+Examples:
+  md2pdf notes.md
+  md2pdf --output /tmp/notes.pdf notes.md
+  md2pdf --html-output /tmp/notes.html notes.md
+EOF
+}
+
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+prefix="$(cd -- "$script_dir/.." && pwd)"
+asset_dir="$prefix/share/md2pdf-vscode"
+css_path="$asset_dir/vscode-gray-print.css"
+postprocess_path="$asset_dir/postprocess_html.py"
+chrome_bin="${MD2PDF_CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
+
+output=""
+html_output=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; usage >&2; exit 2; }
+      output="$2"
+      shift 2
+      ;;
+    --html-output)
+      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; usage >&2; exit 2; }
+      html_output="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || { usage >&2; exit 2; }
+
+input="$1"
+[[ -f "$input" ]] || { echo "Input not found: $input" >&2; exit 1; }
+[[ -f "$css_path" ]] || { echo "Missing stylesheet: $css_path" >&2; exit 1; }
+[[ -f "$postprocess_path" ]] || { echo "Missing postprocessor: $postprocess_path" >&2; exit 1; }
+command -v pandoc >/dev/null 2>&1 || { echo "pandoc is required" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
+[[ -x "$chrome_bin" ]] || { echo "Chrome not found at: $chrome_bin" >&2; exit 1; }
+
+if [[ -z "$output" ]]; then
+  output="${input%.*}.pdf"
+fi
+
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/md2pdf.XXXXXX")"
+cleanup() {
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+if [[ -n "$html_output" ]]; then
+  html_path="$html_output"
+  mkdir -p "$(dirname "$html_path")"
+else
+  html_path="$tmpdir/$(basename "${input%.*}").html"
+fi
+
+mkdir -p "$(dirname "$output")"
+
+pandoc "$input" \
+  -f markdown+pipe_tables+table_captions+task_lists \
+  -t html5 \
+  --standalone \
+  --embed-resources \
+  --css "$css_path" \
+  -o "$html_path"
+
+python3 "$postprocess_path" "$html_path"
+
+html_uri="$(python3 - "$html_path" <<'PY'
+import pathlib
+import sys
+print(pathlib.Path(sys.argv[1]).resolve().as_uri())
+PY
+)"
+
+"$chrome_bin" \
+  --headless=new \
+  --disable-gpu \
+  --allow-file-access-from-files \
+  --no-pdf-header-footer \
+  --print-to-pdf="$output" \
+  "$html_uri" >/dev/null 2>&1
+
+printf '%s\n' "$output"
